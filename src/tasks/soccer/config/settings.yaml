@@ -24,11 +24,14 @@ penalty_spot:
   distance_from_goal: 4.0 # m — ball-to-goal line distance in x
 
 # Scene layout (world-frame positions).
+# ball_pos and shooter_pos are derived from penalty_spot.distance_from_goal;
+# they are listed here as comments for reference only.
+#   ball_pos:    [-distance, 0, ball.radius]
+#   shooter_pos: [-distance - 0.5, 0, 0.8]
 scene:
   goal_pos: [0.0, 0.0, 0.0]
-  ball_pos: [-4.0, 0.0, 0.10]  # x = -penalty_spot.distance_from_goal
-  shooter_pos: [-4.5, 0.0, 0.8]
   goalkeeper_pos: [0.0, 0.0, 0.8]
+  shooter_behind_ball: 0.5  # m — shooter stands this far behind the ball
 
 # Ground contact (shooter reference: restitution 0.8 via solref damping).
 ground:

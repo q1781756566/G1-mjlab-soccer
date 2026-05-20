@@ -37,9 +37,11 @@ class PenaltySpotSettings:
 @dataclass
 class SceneLayoutSettings:
   goal_pos: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-  ball_pos: list[float] = field(default_factory=lambda: [-6.0, 0.0, 0.10])
-  shooter_pos: list[float] = field(default_factory=lambda: [-6.2, 0.0, 0.8])
   goalkeeper_pos: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.8])
+  shooter_behind_ball: float = 0.5
+  # ball_pos and shooter_pos are computed in load_settings() from
+  # penalty_spot.distance_from_goal and ball.radius — they are set as
+  # plain instance attributes after dataclass construction.
 
 
 @dataclass
@@ -95,7 +97,17 @@ def _dict_to_dataclass(d: dict, dc: type) -> object:
 def load_settings() -> SoccerSettings:
   with open(_SETTINGS_PATH) as f:
     raw = yaml.safe_load(f)
-  return _dict_to_dataclass(raw, SoccerSettings)
+  settings = _dict_to_dataclass(raw, SoccerSettings)
+
+  # Derive scene positions from distance_from_goal (single source of truth).
+  d = settings.penalty_spot.distance_from_goal
+  r = settings.ball.radius
+  gx, gy, gz = settings.scene.goal_pos
+  sb = settings.scene.shooter_behind_ball
+  settings.scene.ball_pos = [gx - d, gy, r]
+  settings.scene.shooter_pos = [gx - d - sb, gy, 0.8]
+
+  return settings
 
 
 # Module-level singleton — loaded once at import time.
