@@ -158,15 +158,15 @@ def reset_ball_with_parabolic_trajectory(
   # Pick a random region for each env.
   region_idx = torch.randint(0, num_regions, (n,), device=device)
 
-  # Sample ball start position in local frame (relative to robot).
-  # Robot faces -x (yaw=π), so "in front" is -x.
-  start_x = -(
+  # Sample ball start position in local frame.
+  # G1 faces +x (yaw=0). Ball comes from +x (front), lateral variation in y.
+  start_x = (                          # front (+x)
     vel_cfg.ball_start_x_range[0]
     + torch.rand(n, device=device)
     * (vel_cfg.ball_start_x_range[1] - vel_cfg.ball_start_x_range[0])
   )
   start_y = (
-    vel_cfg.ball_start_y_range[0]
+    vel_cfg.ball_start_y_range[0]    # lateral
     + torch.rand(n, device=device)
     * (vel_cfg.ball_start_y_range[1] - vel_cfg.ball_start_y_range[0])
   )
@@ -177,7 +177,7 @@ def reset_ball_with_parabolic_trajectory(
   )
   ball_start_local = torch.stack([start_x, start_y, start_z], dim=-1)
 
-  # Sample ball end position within chosen region (behind robot).
+  # Sample ball end within chosen region (behind robot, -y).
   region_height_low = torch.tensor(
     [vel_cfg.regions[i.item()]["height"][0] for i in region_idx],
     device=device, dtype=torch.float32,
@@ -195,8 +195,8 @@ def reset_ball_with_parabolic_trajectory(
     device=device, dtype=torch.float32,
   )
 
-  # End x is behind robot (toward goal), +x direction.
-  end_x = (
+  # Behind robot (-x). Width (y) from region, height (z) from region.
+  end_x = -(
     vel_cfg.ball_end_x_range[0]
     + torch.rand(n, device=device)
     * (vel_cfg.ball_end_x_range[1] - vel_cfg.ball_end_x_range[0])
@@ -228,6 +228,14 @@ def reset_ball_with_parabolic_trajectory(
   ball_vel = torch.cat(
     [ball_vel_xy, ball_vel_z.unsqueeze(-1)], dim=-1
   )
+
+  # Store the chosen region per environment for privileged critic observations.
+  t = getattr(env, "_gk_region", None)
+  if t is None or t.shape[0] != env.num_envs:
+    t = torch.zeros(env.num_envs, dtype=torch.float32, device=device)
+    setattr(env, "_gk_region", t)
+  t[env_ids] = region_idx.float()
+  setattr(env, "_gk_region", t)
 
   # Ball orientation unchanged from default.
   asset: Entity = env.scene[ball_cfg.name]

@@ -15,5 +15,7 @@ from .reset_events import *  # noqa: F403
 from .rewards import *  # noqa: F403
 from .soccer_reset import *  # noqa: F403
 from .terminations import *  # noqa: F403
+from . import goalkeeper_obs  # noqa: F401
+from . import goalkeeper_rewards  # noqa: F401
 from . import training_obs  # noqa: F401
 from . import training_rewards  # noqa: F401

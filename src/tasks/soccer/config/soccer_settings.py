@@ -75,7 +75,7 @@ class BallTrajectorySettings:
   """Parameters controlling the parabolic ball trajectory model."""
 
   ball_start_distance: list[float] = field(default_factory=lambda: [3.0, 5.0])
-  ball_end_distance: list[float] = field(default_factory=lambda: [-0.6, -0.1])
+  ball_end_distance: list[float] = field(default_factory=lambda: [0.1, 0.6])
   t_flight: list[float] = field(default_factory=lambda: [0.5, 1.0])
 
 
@@ -86,6 +86,14 @@ class GroundSettings:
     default_factory=lambda: [0.9, 0.95, 0.001, 0.5, 2]
   )
   friction: list[float] = field(default_factory=lambda: [1.0, 1.0])
+
+
+@dataclass
+class GoalkeeperTrainingSettings:
+  ee_reach_std: float = 0.3
+  stop_ball_vel_drop: float = 2.0
+  behind_robot_x: float = 0.0
+  episode_length_s: float = 3.0
 
 
 @dataclass
@@ -106,6 +114,9 @@ class SoccerSettings:
   )
   ball_trajectory: BallTrajectorySettings = field(
     default_factory=BallTrajectorySettings
+  )
+  goalkeeper_training: GoalkeeperTrainingSettings = field(
+    default_factory=GoalkeeperTrainingSettings
   )
   episode_length_s: float = 10.0
   goalkeeper_episode_length_s: float = 3.0

@@ -102,16 +102,16 @@ def unitree_g1_shooter_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
 def unitree_g1_goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
   """Unitree G1 naive goalkeeper: robot at goal line facing incoming ball.
 
-  Ball trajectory uses a parabolic model with 6 landing regions, matching
-  the Humanoid-Goalkeeper paper's assign_ball_states approach. Each reset
-  picks a random region, samples start/end positions, and computes the
-  launch velocity to hit the target point.
+  Coordinates match Humanoid-Goalkeeper reference:
+  - G1 at (0, 0, 0.8), faces +x (yaw=π/2), same as IsaacGym default.
+  - Ball starts at +x (3-5m front), ends at -x (0.1-0.6m behind).
+  - Goal at -x behind G1, default orientation (posts along y, opening ±x).
   """
   cfg = make_soccer_env_cfg()
   cfg.episode_length_s = SETTINGS.goalkeeper_episode_length_s
 
   s = SETTINGS.scene
-  cfg.scene.entities["robot"] = _g1_robot_at(tuple(s.goalkeeper_pos), math.pi)
+  cfg.scene.entities["robot"] = _g1_robot_at(tuple(s.goalkeeper_pos), 0.0)
   cfg.scene.entities["ball"].init_state.pos = tuple(s.ball_pos)
 
   # Build region list for parabolic trajectory.
@@ -143,6 +143,11 @@ def unitree_g1_goalkeeper_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
       "ball_cfg": SceneEntityCfg("ball"),
     },
   )
+
+  # Goal behind G1 (-x direction). G1 faces +x, ball comes from +x,
+  # lands at -x. Default orientation: posts along y, opening faces ±x.
+  from src.tasks.soccer.goal import get_goal_cfg
+  cfg.scene.entities["goal"] = get_goal_cfg(pos=(-0.5, 0.0, 0.0))
 
   _setup_robot_env(cfg)
 

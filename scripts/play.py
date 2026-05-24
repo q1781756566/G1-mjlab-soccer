@@ -174,9 +174,22 @@ def run_play(task_id: str, cfg: PlayConfig):
   else:
     runner_cls = load_runner_cls(task_id) or MjlabOnPolicyRunner
     runner = runner_cls(env, asdict(agent_cfg), device=device)
-    runner.load(
-      str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
-    )
+
+    # Detect reference HIMPPO checkpoint: single model_state_dict with
+    # ActorCritic sub-keys. Bypass mjlab's legacy migration which would
+    # convert keys to MLPModel format.
+    ckpt = torch.load(str(resume_path), map_location=device)
+    if "model_state_dict" in ckpt and hasattr(runner.alg.actor, "history_encoder"):
+      print("[INFO] Detected HIMPPO ActorCritic checkpoint — loading directly.")
+      actor_state = {
+        k: v for k, v in ckpt["model_state_dict"].items()
+        if not k.startswith("critic.")
+      }
+      runner.alg.actor.load_state_dict(actor_state, strict=False)
+    else:
+      runner.load(
+        str(resume_path), load_cfg={"actor": True}, strict=True, map_location=device
+      )
     policy = runner.get_inference_policy(device=device)
 
   # Handle "auto" viewer selection.

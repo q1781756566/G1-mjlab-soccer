@@ -11,6 +11,7 @@ from mjlab.sensor import ContactMatch, ContactSensorCfg
 from src.assets.robots import G1_ACTION_SCALE, get_g1_robot_cfg
 from src.assets.robots.unitree_g1.g1_constants import FULL_COLLISION, HOME_KEYFRAME
 from src.tasks.soccer.config.soccer_settings import SETTINGS
+from src.tasks.soccer.config.training.goalkeeper_env_cfg import make_goalkeeper_env_cfg
 from src.tasks.soccer.config.training.stage1_env_cfg import make_stage1_env_cfg
 from src.tasks.soccer.config.training.stage2_env_cfg import make_stage2_env_cfg
 from src.tasks.soccer.mdp import MultiMotionSoccerCommandCfg
@@ -136,9 +137,51 @@ def unitree_g1_stage2_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
     if isinstance(motion_cmd, MultiMotionSoccerCommandCfg):
       motion_cmd.debug_vis = True
       motion_cmd.sampling_mode = "uniform"
-      # Disable domain randomization for clean, repeatable playback.
       motion_cmd.pose_range = {}
       motion_cmd.velocity_range = {}
       motion_cmd.joint_position_range = (0.0, 0.0)
+
+  return cfg
+
+
+def unitree_g1_goalkeeper_training_env_cfg(play: bool = False) -> ManagerBasedRlEnvCfg:
+  """G1 goalkeeper training: single-stage perception-based interception.
+
+  Matches the Humanoid-Goalkeeper paper's design with 10-frame history
+  stacking, 6-region parabolic ball trajectories, and asymmetric actor-critic.
+
+  Uses the GK reference default joint positions (goalkeeper stance) as the
+  action offset base, and uniform action_scale=0.25 to match the reference
+  PD controller. This ensures compatibility with pretrained checkpoints.
+  """
+  from src.tasks.soccer.mdp.goalkeeper_obs import (
+    _GK_DEFAULT_JOINT_POS, get_gk_robot_cfg,
+  )
+  from mjlab.envs.mdp.actions import JointPositionActionCfg
+
+  cfg = make_goalkeeper_env_cfg()
+
+  # Robot with GK articulation (ref-matched PD gains) and GK stance.
+  robot_cfg = get_gk_robot_cfg()
+  robot_cfg.init_state = replace(
+    robot_cfg.init_state,
+    pos=tuple(SETTINGS.scene.goalkeeper_pos),
+    joint_pos=_GK_DEFAULT_JOINT_POS,
+  )
+  robot_cfg.collisions = (FULL_COLLISION,)
+  cfg.scene.entities["robot"] = robot_cfg
+
+  _setup_g1_training(cfg)
+
+  # Uniform action scale 0.25 (PD gains now match reference).
+  joint_pos_action = cfg.actions["joint_pos"]
+  assert isinstance(joint_pos_action, JointPositionActionCfg)
+  joint_pos_action.scale = 0.25
+
+  if play:
+    cfg.episode_length_s = int(1e9)
+    cfg.observations["actor"].enable_corruption = False
+    cfg.events.pop("push_robot", None)
+    cfg.events.pop("perturb_ball_vel", None)
 
   return cfg

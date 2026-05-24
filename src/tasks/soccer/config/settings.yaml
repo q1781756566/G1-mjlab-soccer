@@ -70,14 +70,19 @@ goalkeeper_regions:
   - height: [0.1, 0.3]
     width:  [-1.5, 0.0]
 
-# Ball start position randomization (parabolic trajectory model).
-# Values are magnitudes — the sign is applied in code based on robot orientation:
-#   start_x is negative (in front of robot, facing direction)
-#   end_x is positive (behind robot, toward goal)
+# Ball trajectory (matching Humanoid-GK assign_ball_states).
+# G1 faces +x (yaw=0). Ball starts at +x [3,5]m front, lands at -x behind.
 ball_trajectory:
-  ball_start_distance: [3.0, 5.0] # m — ball starts distance in front of robot
-  ball_end_distance: [0.1, 0.6] # m — ball lands 0.1~0.6m behind robot
+  ball_start_distance: [3.0, 5.0] # m — front of robot (+x)
+  ball_end_distance: [0.1, 0.6] # m — (negated: behind robot at -x)
   t_flight: [0.6, 1.0] # s — flight time
+
+# Goalkeeper training settings.
+goalkeeper_training:
+  ee_reach_std: 0.3             # sigma for end-effector reach reward exp(-dist²/σ²)
+  stop_ball_vel_drop: 2.0       # m/s velocity drop threshold for block detection
+  behind_robot_x: 0.0           # x threshold for "ball behind robot"
+  episode_length_s: 3.0         # matches goalkeeper_episode_length_s
 
 # Shooter ball velocity (for moving-ball kick scenarios).
 shooter_ball_vel:
