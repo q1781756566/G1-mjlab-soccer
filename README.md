@@ -38,6 +38,22 @@ python scripts/play.py Unitree-G1-Goalkeeper --agent zero --viewer native
 # Eval goalkeeper
 python scripts/eval_naive_goalkeeper.py --headless --num-trials 50
 python scripts/eval_naive_goalkeeper.py --headless --num-trials 50 --checkpoint <path>
+
+# --- Compete (Phase 2: cross-evaluation) ---
+
+# Shooter vs Goalkeeper headless batch (10 trials, Phase 2 default)
+python scripts/compete.py \
+    --shooter-checkpoint <team_a_shooter.pt> \
+    --goalkeeper-checkpoint <team_b_goalkeeper.pt> \
+    --headless --num-trials 10
+
+# Interactive viewer (debugging)
+python scripts/compete.py \
+    --shooter-checkpoint <path> \
+    --goalkeeper-checkpoint <path>
+
+# Zero-agent baseline (no checkpoints required)
+python scripts/compete.py --headless --num-trials 10
 ```
 
 ## Evaluation
@@ -116,6 +132,7 @@ scripts/
   play.py                              # Interactive visualization
   eval_naive_shooter.py                # Shooter eval (headless stats or viewer)
   eval_naive_goalkeeper.py             # Goalkeeper eval (headless stats or viewer)
+  compete.py                           # Phase 2 cross-evaluation (two robots, two policies)
 ```
 
 ## For CS2810 Students
@@ -134,9 +151,13 @@ It provides:
 
 **You need to implement training yourself.** (*Jinxi's Note: actually you cannot get full 60% credit by just running these configs, you need to understand the design and implement your own training pipeline.*)
 
-> **Note**: Adversarial play (loading two G1 robots simultaneously in the same scene)
-> is **not yet implemented**. This feature will be added in a future update to support
-> Phase 2 of the project (the adversarial tournament).
+> **Phase 2 Note**: A basic multi-agent competition template is provided as
+> `scripts/compete.py`. It loads two G1 robots (shooter + goalkeeper) into a
+> single MuJoCo scene, routes observations to each team's policy independently,
+> and concatenates actions before stepping the simulator. Teams **must customize**
+> the observation terms in `make_compete_env_cfg()` to match their own (and their
+> opponent's) policy architectures. See the ``CUSTOMIZE_OBSERVATIONS`` markers
+> in the script for details.
 
 ## Settings (`config/settings.yaml`)
 
@@ -160,6 +181,21 @@ ball_trajectory:
 episode_length_s: 10.0                 # shooter
 goalkeeper_episode_length_s: 3.0       # goalkeeper
 ```
+
+## Contributing
+
+This template is a work in progress. The training configs, environment wrappers,
+and evaluation scripts may contain bugs or rough edges. **We encourage all
+students to:**
+
+- **Report issues** — if you find a bug, a broken config, or unclear
+  documentation, open a GitHub Issue on the template repository.
+- **Submit pull requests** — fixes, improvements, and additional utilities
+  (e.g., better observation configs, visualization tools, or multi-agent
+  helpers) are welcome. PRs that benefit the whole class will be merged and
+  acknowledged.
+
+Treat this repository as a living codebase that improves with your feedback.
 
 ## Acknowledgements
 
