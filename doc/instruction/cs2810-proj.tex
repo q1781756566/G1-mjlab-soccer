@@ -97,44 +97,47 @@ The 60\% allocation is divided equally between the two tasks (30\% each), using 
     \item \textbf{Goalkeeper Policy (30 points total):} Evaluated using \texttt{eval\_naive\_goalkeeper.py}. Success is defined as a clean block where the ball is intercepted or deflected outside the goal frame.
 \end{itemize}
 
-Grading tiers for both individual components are structured as follows:
-\begin{table}[htp]
-\centering
-\small
-\begin{tabular}{lcc}
-\toprule
-\textbf{Success / Block Rate Brackets} & \textbf{Percentage of Component Credit} & \textbf{Points Awarded per Task} \\ \midrule
-100\% Success & 100\% & 30.0 Points \\
-92\% -- 100\% Success  & 80\%  & 24.0 Points \\
-84\% -- 92\% Success  & 60\%  & 18.0 Points \\
-80\% -- 84\% Success  & 50\%  & 15.0 Points \\
-Under 80\% Success    & 0\% & 0.0 Points \\ 
-\bottomrule
-\end{tabular}
-\caption{Phase 1 Performance Tier Matrix}
-\label{tab:phase1_rubric}
-\end{table}
+Both tasks are scored with a linear formula applied to the success/block rate over 50 evaluation trials:
+\[
+\text{score} = \max\left(0, \frac{\text{success\_rate} - 0.8}{0.2}\right) \times 30
+\]
+Success rates below 80\% receive 0 points. At 80\% the score is 0, at 100\% the score is 30, with linear interpolation in between.
 
 \subsection{Phase 2: Cross-Evaluation Tournament (30\% of project score)}
 
 Phase 2 is structured as a decentralized, all-to-all peer-to-peer cross-evaluation. The 30\% allocation is divided equally between shooting and goalkeeping (15\% each). After completing basic single-agent policies in Phase 1, teams continue to improve their agents---through adversarial training, self-play, or further single-agent optimization---and then compete against every other team.
 
-Because each team will design unique observation spaces, feature extractors, and neural network architectures, your codebases will be heterogeneous. Therefore, the tournament relies on teams sharing their repositories and checkpoints so that opponents can load and run them locally.
+Because each team will design unique observation spaces, feature extractors, and neural network architectures, your codebases will be heterogeneous. To enable cross-evaluation without requiring teams to share code or checkpoints, the tournament adopts a standardized API interface: each team deploys their trained policy behind a lightweight server, and the competition script \texttt{scripts/compete.py} loads two G1 robots into a single MuJoCo scene and queries each team's server at every simulation step.
 
-\textbf{Important Environment Note}: The current template code \textbf{does not yet support} loading two distinct G1 robots simultaneously in a single MuJoCo scene. A basic multi-agent competition template is provided as \texttt{scripts/compete.py} to help teams get started---it loads two G1 robots into one scene and routes observations to two independent policies. Teams must customize the observation terms in the script to match their own (and their opponent's) policy architectures. See the \texttt{CUSTOMIZE\_OBSERVATIONS} markers in the script for guidance.
+\subsubsection{API Protocol}
+
+All teams must implement a policy server exposing the following two endpoints (a reference implementation is provided as \texttt{scripts/api\_server.py}):
+
+\begin{itemize}
+    \item \texttt{POST /act} --- Receives an observation and returns an action.
+    \begin{verbatim}
+    Request:  {"observation": [[f32, ...]]}
+    Response: {"action": [[f32, ...]]}\end{verbatim}
+    \item \texttt{POST /reset} --- Resets the policy's internal state (LSTM hidden state, history buffer, etc.).
+    \begin{verbatim}
+    Request:  {}
+    Response: {"status": "ok"}\end{verbatim}
+\end{itemize}
+
+Teams may implement the server in any framework (the reference uses FastAPI), as long as the endpoints and JSON formats match exactly.
 
 \subsubsection{Timeline and Milestones}
 \begin{itemize}
     \item \textbf{Weeks 13--16: Agent Development \& Improvement} \\
     Teams first complete their basic single-agent shooting and goalkeeping policies (Phase 1). They then continuously improve their agents' capabilities through adversarial training, self-play, or further single-agent optimization. By the end of Week 16 (6.21), every team must freeze their code and publicly publish a GitHub repository containing their complete implementation, training configurations, and final trained checkpoints for both shooter and goalkeeper.
 
-    \item \textbf{Weeks 17--18: Cross-Evaluation \& Peer Coordination} \\
-    Teams must contact every other team, clone each other's repositories, and integrate opponent policies into their local multi-agent environment. For each pair of teams (Team A and Team B), both directions are evaluated:
+    \item \textbf{Week 17: Tournament \& Report Submission} \\
+    Teams deploy their policy servers and the tournament is conducted using \texttt{scripts/compete.py}. For each pair of teams (Team A and Team B), both directions are evaluated:
     \begin{itemize}
         \item Team A's Shooter vs.\ Team B's Goalkeeper (10 trials)
         \item Team B's Shooter vs.\ Team A's Goalkeeper (10 trials)
     \end{itemize}
-    Teams must actively collaborate to cross-verify simulator setups, initial randomizations, and evaluation scripts to ensure consistent and reproducible results.
+    Teams need to actively collaborate to cross-verify the env setup and the competition results. Both the tournament results and the final report are due by the end of Week 17 (6.26).
 \end{itemize}
 
 \subsubsection{Scoring Mechanism}
@@ -142,22 +145,13 @@ There are 14 teams in total. Each team's Phase 2 score is computed separately fo
 
 \begin{itemize}
     \item \textbf{Base Score:} Every team starts with 2 points for each task.
-    \item \textbf{Head-to-Head Bonus:} For each opponent team that your agent outperforms, you earn +1 point, up to a maximum of 15 points.
+    \item \textbf{Head-to-Head Points:} For each opponent team, a direct matchup is played. Taking Team A's Shooter vs.\ Team B's Goalkeeper as an example: 10 trials are run. If Team A's shooter scores $>5$ goals, Team A earns +1 point; otherwise (i.e., the goalkeeper holds the shooter to $\le 5$ goals), Team B earns +1 point. The same rule applies symmetrically to Team A's Goalkeeper vs.\ Team B's Shooter.
 \end{itemize}
 
-Formally, for a given task (shooting or goalkeeping), let $r_i$ be your agent's success rate against opponent $i$'s counterpart (goals or blocks over 10 trials). Sort all 14 teams in descending order of $r_i$. A team \textbf{outranks} every opponent ranked below it. Your final score for that task is:
-\[
-\text{score} = 2 + \text{number of opponents you outrank}
-\]
-
-\subsubsection{Evaluation Rules and Consistency}
-\begin{enumerate}
-    \item \textbf{Match Execution:} A full cross-evaluation matchup between two teams consists of 10 trials of Team A's Shooter vs.\ Team B's Goalkeeper, and 10 trials of Team B's Shooter vs.\ Team A's Goalkeeper.
-    \item \textbf{Mandatory Peer Communication:} Teams must actively collaborate and communicate during Weeks 17--18. Because both teams are executing the cross-evaluations locally, you must cross-verify your simulator setups, initial state randomizations, and evaluation scripts to ensure that the performance metrics recorded by Team A match those recorded by Team B. The results presented in both teams' final reports \textbf{must be completely consistent}.
-\end{enumerate}
+Each team plays every other team once per task direction, yielding 13 head-to-head opportunities per task. The maximum score per task is therefore $2 + 13 = 15$ points.
 
 \subsection{Submission and Deliverables (10\% of project score)}
-Submission consists of a PDF report and the corresponding code repository before the mid of Week 18 (7.3). The PDF report must include:
+Submission consists of a PDF report and the corresponding code repository before the end of Week 17 (6.26). The PDF report must include:
 \begin{itemize}
     \item \textbf{Phase 1 Results:} Basic shooting and goalkeeping evaluation results (success/block rates over 50 trials) with analysis.
     \item \textbf{Phase 2 Results:} Complete cross-evaluation results against all other teams---your shooter vs.\ each opponent's goalkeeper, and your goalkeeper vs.\ each opponent's shooter (10 trials each). Include a summary table of all matchups and the final tournament scores for both tasks.
@@ -210,22 +204,26 @@ The \texttt{train.py} script in \texttt{scripts/} serves as the training entrypo
 
 \subsection{Cross-Evaluation Competition}
 
-For Phase 2 cross-evaluation, use the \texttt{scripts/compete.py} script:
+For Phase 2 cross-evaluation, teams deploy their policies as API servers and use \texttt{scripts/compete.py} to run matchups:
 
 \begin{verbatim}
-# Headless batch (10 trials, Phase 2 default)
+# Start a policy server
+python scripts/api_server.py --checkpoint <path> --port 8000 --task shooter
+
+# Run a matchup (local checkpoint mode, for debugging)
 python scripts/compete.py \
     --shooter-checkpoint <team_a_shooter.pt> \
     --goalkeeper-checkpoint <team_b_goalkeeper.pt> \
     --headless --num-trials 10
 
-# Interactive viewer (debugging)
+# Run a matchup (REST API mode, for tournament)
 python scripts/compete.py \
-    --shooter-checkpoint <path> \
-    --goalkeeper-checkpoint <path>
+    --shooter-api http://<team_a_ip>:8000 \
+    --goalkeeper-api http://<team_b_ip>:8000 \
+    --headless --num-trials 10
 \end{verbatim}
 
-The script loads two G1 robots into a single MuJoCo scene, routes observations to two independent policies, concatenates their actions, and reports head-to-head statistics (goals scored, blocks). Teams must customize the observation terms in \texttt{make\_compete\_env\_cfg()} to match their policy architectures---see the \texttt{CUSTOMIZE\_OBSERVATIONS} markers in the script.
+The script loads two G1 robots into a single MuJoCo scene, sends observations to each team's API (or local policy), concatenates their actions, and reports head-to-head statistics (goals scored, blocks). A reference API server implementation is provided as \texttt{scripts/api\_server.py}.
 
 \subsection{Contributing and Reporting Issues}
 

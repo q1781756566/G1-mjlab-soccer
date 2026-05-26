@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import requests
 import torch
 import tyro
 
@@ -531,6 +532,77 @@ class _ZeroPolicy:
 
 
 # =============================================================================
+# REST API policy client  (Phase 2 tournament — robosuite format)
+# =============================================================================
+
+class ApiPolicy:
+    """Policy that delegates to a remote FastAPI server via REST.
+
+    Implements the Phase 2 tournament protocol:
+      POST /act    - send observation, receive action
+      POST /reset  - reset policy hidden state
+
+    Parameters
+    ----------
+    url : str
+        Base URL of the policy server (e.g. ``http://team-a:8000``).
+    action_dim : int
+        Expected action dimension (used only for validation).
+    device : str
+        Torch device for the output tensor.
+    timeout : float
+        HTTP request timeout in seconds.
+    """
+
+    def __init__(
+        self, url: str, action_dim: int, device: str, timeout: float = 2.0,
+    ):
+        self._url = url.rstrip("/")
+        self._device = device
+        self._timeout = timeout
+        # Validate connection at startup.
+        try:
+            resp = requests.post(
+                f"{self._url}/reset", json={}, timeout=self._timeout,
+            )
+            resp.raise_for_status()
+            print(f"[INFO] API policy connected: {self._url}  (act_dim={action_dim})")
+        except requests.RequestException as e:
+            print(f"[WARN] API policy at {self._url} is not reachable: {e}")
+            print(f"       Make sure the server is running before starting trials.")
+
+    def __call__(self, obs: dict) -> torch.Tensor:
+        """Send observation to remote server and return action tensor."""
+        # obs["actor"] is a torch tensor of shape (1, obs_dim).
+        obs_list = obs["actor"].cpu().numpy().tolist()
+        try:
+            resp = requests.post(
+                f"{self._url}/act",
+                json={"observation": obs_list},
+                timeout=self._timeout,
+            )
+            resp.raise_for_status()
+            action = torch.tensor(
+                resp.json()["action"], device=self._device, dtype=torch.float32,
+            )
+            return action
+        except requests.RequestException as e:
+            raise RuntimeError(
+                f"API call to {self._url}/act failed: {e}\n"
+                f"  Observation shape: {obs['actor'].shape}"
+            ) from e
+
+    def reset(self) -> None:
+        """Signal the remote server to reset its policy state."""
+        try:
+            requests.post(
+                f"{self._url}/reset", json={}, timeout=self._timeout,
+            )
+        except requests.RequestException:
+            pass  # best-effort reset
+
+
+# =============================================================================
 # Combined policy wrapper  (for viewer)
 # =============================================================================
 
@@ -731,6 +803,12 @@ class CompeteConfig:
     goalkeeper_checkpoint: str | None = None
     """Path to the goalkeeper policy checkpoint (.pt)."""
 
+    shooter_api: str | None = None
+    """REST API URL for the shooter policy (Phase 2 tournament)."""
+
+    goalkeeper_api: str | None = None
+    """REST API URL for the goalkeeper policy (Phase 2 tournament)."""
+
     num_trials: int = 0
     """Number of evaluation trials (> 0 enables headless batch mode)."""
 
@@ -786,17 +864,23 @@ def run_compete(cfg: CompeteConfig) -> None:
     act_dim_goalkeeper = env_base.action_manager.get_term("goalkeeper_joint_pos").action_dim
     print(f"Action dims: shooter={act_dim_shooter}, goalkeeper={act_dim_goalkeeper}")
 
-    if cfg.shooter_checkpoint:
+    # Shooter: API takes precedence over checkpoint.
+    if cfg.shooter_api:
+        shooter_policy = ApiPolicy(cfg.shooter_api, act_dim_shooter, device)
+    elif cfg.shooter_checkpoint:
         shooter_policy = _load_shooter_policy(cfg.shooter_checkpoint, env_base, device)
     else:
         shooter_policy = _ZeroPolicy(act_dim_shooter, device)
-        print("[INFO] No shooter checkpoint — using zero policy.")
+        print("[INFO] No shooter checkpoint or API — using zero policy.")
 
-    if cfg.goalkeeper_checkpoint:
+    # Goalkeeper: API takes precedence over checkpoint.
+    if cfg.goalkeeper_api:
+        goalkeeper_policy = ApiPolicy(cfg.goalkeeper_api, act_dim_goalkeeper, device)
+    elif cfg.goalkeeper_checkpoint:
         goalkeeper_policy = _load_goalkeeper_policy(cfg.goalkeeper_checkpoint, env_base, device)
     else:
         goalkeeper_policy = _ZeroPolicy(act_dim_goalkeeper, device)
-        print("[INFO] No goalkeeper checkpoint — using zero policy.")
+        print("[INFO] No goalkeeper checkpoint or API — using zero policy.")
 
     # Wrap after policy construction so runner sees the raw env.
     env = RslRlVecEnvWrapper(env_base, clip_actions=100.0)

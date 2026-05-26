@@ -15,6 +15,10 @@ with the Unitree G1 on MuJoCo physics. Built on the
 
 See [doc/setup_en.md](doc/setup_en.md) for environment installation.
 
+```bash
+pip install "fastapi[standard]"
+```
+
 ## Quick Start
 
 ```bash
@@ -41,7 +45,17 @@ python scripts/eval_naive_goalkeeper.py --headless --num-trials 50 --checkpoint 
 
 # --- Compete (Phase 2: cross-evaluation) ---
 
-# Shooter vs Goalkeeper headless batch (10 trials, Phase 2 default)
+# Start policy servers
+python scripts/api_server.py --checkpoint <shooter.pt> --port 8000 --task shooter
+python scripts/api_server.py --checkpoint <goalkeeper.pt> --port 8001 --task goalkeeper
+
+# REST API mode (Phase 2 tournament)
+python scripts/compete.py \
+    --shooter-api http://<team_a_ip>:8000 \
+    --goalkeeper-api http://<team_b_ip>:8001 \
+    --headless --num-trials 10
+
+# Local checkpoint mode (debugging)
 python scripts/compete.py \
     --shooter-checkpoint <team_a_shooter.pt> \
     --goalkeeper-checkpoint <team_b_goalkeeper.pt> \
@@ -133,6 +147,7 @@ scripts/
   eval_naive_shooter.py                # Shooter eval (headless stats or viewer)
   eval_naive_goalkeeper.py             # Goalkeeper eval (headless stats or viewer)
   compete.py                           # Phase 2 cross-evaluation (two robots, two policies)
+  api_server.py                        # Phase 2 REST API reference server
 ```
 
 ## For CS2810 Students
@@ -151,13 +166,14 @@ It provides:
 
 **You need to implement training yourself.** (*Jinxi's Note: actually you cannot get full 60% credit by just running these configs, you need to understand the design and implement your own training pipeline.*)
 
-> **Phase 2 Note**: A basic multi-agent competition template is provided as
-> `scripts/compete.py`. It loads two G1 robots (shooter + goalkeeper) into a
-> single MuJoCo scene, routes observations to each team's policy independently,
-> and concatenates actions before stepping the simulator. Teams **must customize**
-> the observation terms in `make_compete_env_cfg()` to match their own (and their
-> opponent's) policy architectures. See the ``CUSTOMIZE_OBSERVATIONS`` markers
-> in the script for details.
+> **Phase 2 Note**: The tournament uses a standardized REST API (robosuite
+> format). Each team deploys their policy as a FastAPI server using
+> `scripts/api_server.py`. The competition script `scripts/compete.py` loads
+> two G1 robots (shooter + goalkeeper) into one MuJoCo scene and calls each
+> team's API to retrieve actions at every step. Teams **must customize**
+> the observation terms in `make_compete_env_cfg()` to match their own (and
+> their opponent's) policy architectures. See the ``CUSTOMIZE_OBSERVATIONS``
+> markers in the script for details.
 
 ## Settings (`config/settings.yaml`)
 
