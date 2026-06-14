@@ -70,20 +70,26 @@ def _load_policy(checkpoint_path: str, env, device: str):
   legacy migration which would convert keys to MLPModel format.
   """
   print(f"[INFO] Loading policy from: {checkpoint_path}")
-  loaded = torch.load(checkpoint_path, map_location=device)
+  loaded = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
-  agent_cfg = unitree_g1_goalkeeper_ppo_runner_cfg()
-  runner = GoalkeeperRunner(env, asdict(agent_cfg), device=device)
-
-  if "model_state_dict" in loaded and hasattr(runner.alg.actor, "history_encoder"):
+  if "model_state_dict" in loaded:
+    # Reference Humanoid-Goalkeeper checkpoint: a single unified HIMPPO
+    # ActorCritic. Load it directly into GoalkeeperRunner's custom model.
     print("[INFO] Detected HIMPPO ActorCritic checkpoint — loading directly.")
+    agent_cfg = unitree_g1_goalkeeper_ppo_runner_cfg()
+    runner = GoalkeeperRunner(env, asdict(agent_cfg), device=device)
     actor_state = {k: v for k, v in loaded["model_state_dict"].items() if not k.startswith("critic.")}
     runner.alg.actor.load_state_dict(actor_state, strict=False)
-    print("[INFO] Policy loaded successfully.")
   else:
+    # Our distilled native rsl_rl MLP policy (actor_state_dict / critic_state_dict).
+    print("[INFO] Detected native MLP checkpoint — loading.")
+    from mjlab.rl import MjlabOnPolicyRunner
+    from src.tasks.soccer.config.g1.gk_train_cfg import goalkeeper_train_runner_cfg
+    agent_cfg = goalkeeper_train_runner_cfg()
+    runner = MjlabOnPolicyRunner(env, asdict(agent_cfg), device=device)
     runner.load(checkpoint_path, load_cfg={"actor": True})
-    print("[INFO] Policy loaded successfully.")
 
+  print("[INFO] Policy loaded successfully.")
   policy = runner.get_inference_policy(device=env.unwrapped.device)
   return policy
 
