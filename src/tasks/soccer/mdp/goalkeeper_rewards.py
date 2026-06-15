@@ -52,10 +52,10 @@ def _reset_gk_state(
   """Reset per-environment GK tracking state on episode start."""
   if env_ids is None:
     env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int)
-  for key in ("_gk_max_ball_speed", "_gk_block_awarded"):
+  for key in ("_gk_max_ball_speed", "_gk_block_awarded", "_gk_conceded"):
     t = getattr(env, key, None)
     if t is not None and t.shape[0] == env.num_envs:
-      t[env_ids] = 0.0 if "speed" in key else False
+      t[env_ids] = 0.0
 
 
 # -- Reward functions ----------------------------------------------------------
@@ -64,6 +64,8 @@ def _reset_gk_state(
 def goalkeeper_ee_reach(
   env: ManagerBasedRlEnv,
   std: float = 0.3,
+  planar: bool = False,
+  near_gate_x: float = 0.0,
   ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
   robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
   ee_body_names: tuple[str, ...] = (
@@ -75,9 +77,23 @@ def goalkeeper_ee_reach(
 ) -> torch.Tensor:
   """End-effector reach reward: exponential distance to ball.
 
-  Paper's 'eereach' — encourages hands and feet to reach toward the ball.
-  Rewards proximity of 4 end-effectors (both hands + both feet) to the ball
-  using an exponential decay: sum_i exp(-||ee_i - ball||² / σ²).
+  Paper's 'eereach' — encourages hands and feet to reach toward the ball,
+  rewarding proximity of 4 end-effectors (both hands + both feet) via an
+  exponential decay: sum_i exp(-||ee_i - ball||² / σ²).
+
+  If ``planar`` is True, only the lateral/vertical (y, z) components of the
+  offset are used (the forward x axis is ignored). This is important for the
+  goalkeeper: the ball starts 3-5m in front, so a full 3D reach reward pulls the
+  keeper into a forward lunge that topples it. Rewarding y-z alignment instead
+  makes the keeper stay on its line (x≈0) and move a hand/foot to the ball's
+  crossing point — the actual blocking behavior.
+
+  If ``near_gate_x`` > 0, the reward is gated to fire only while the ball is
+  within ``near_gate_x`` metres of the keeper plane (|ball_x_rel| < near_gate_x).
+  Combined with full 3D distance (planar=False), this rewards an actual
+  interception at the moment the ball arrives — it cannot be gamed by loose
+  alignment, and being gated it does not pull the keeper into an early lunge at
+  the far ball.
 
   Weight: 10.0 (matches paper).
   """
@@ -89,26 +105,106 @@ def goalkeeper_ee_reach(
   ee_pos = robot.data.body_link_pos_w[:, ee_indices]  # (B, N, 3)
 
   delta = ee_pos - ball_pos.unsqueeze(1)  # (B, N, 3)
+  if planar:
+    delta = delta[..., 1:]  # keep (y, z) only — ignore forward x
   dist_sq = torch.sum(delta * delta, dim=-1)  # (B, N)
   reward_per_ee = torch.exp(-dist_sq / (std * std))  # (B, N)
-  return reward_per_ee.sum(dim=-1)  # (B,)
+  reward = reward_per_ee.sum(dim=-1)  # (B,)
+
+  if near_gate_x > 0.0:
+    ball_x_rel = ball_pos[:, 0] - env.scene.env_origins[:, 0]
+    gate = (ball_x_rel.abs() < near_gate_x).to(reward.dtype)
+    reward = reward * gate
+
+  return reward
+
+
+def goalkeeper_body_intercept(
+  env: ManagerBasedRlEnv,
+  std: float = 0.35,
+  ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+  robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+  """Dense whole-body blocking reward: exp(-min_dist(ball, ANY body link)²/σ²).
+
+  A block is ANY body part intersecting the ball, so rewarding the minimum
+  distance from the ball to any of the robot's body links is directly aligned
+  with blocking and dense whenever the ball is near the keeper.
+  """
+  ball: Entity = env.scene[ball_cfg.name]
+  robot: Entity = env.scene[robot_cfg.name]
+  ball_pos = ball.data.root_link_pos_w           # (B,3)
+  body_pos = robot.data.body_link_pos_w          # (B,L,3)
+  d2 = (body_pos - ball_pos.unsqueeze(1)).pow(2).sum(dim=-1)
+  return torch.exp(-d2.min(dim=1).values / (std * std))
+
+
+def goalkeeper_intercept_point(
+  env: ManagerBasedRlEnv,
+  std: float = 0.4,
+  ee_body_names: tuple[str, ...] = (
+    "left_wrist_yaw_link", "right_wrist_yaw_link",
+    "left_ankle_roll_link", "right_ankle_roll_link",
+  ),
+  ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+  robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+  """Dense reward: nearest end-effector close to the ball's INTERCEPTION POINT.
+
+  We extrapolate the ball's trajectory (ballistic, with gravity) to the keeper's
+  plane (x_rel = 0) to get the exact (y, z) where the ball will cross, then
+  reward the nearest hand/foot for being at that 3D point. Unlike rewarding
+  proximity to the ball's *current* position (which pulls a forward lunge) or
+  loose planar alignment (which the keeper games without intercepting), this
+  gives a STABLE, directional target over the whole flight, so the keeper learns
+  to pre-position a limb exactly where the ball will arrive — the actual block.
+  """
+  ball: Entity = env.scene[ball_cfg.name]
+  robot: Entity = env.scene[robot_cfg.name]
+  bp = ball.data.root_link_pos_w           # (B,3) world
+  bv = ball.data.root_link_lin_vel_w       # (B,3)
+  org = env.scene.env_origins              # (B,3)
+
+  ball_x_rel = bp[:, 0] - org[:, 0]
+  vx = bv[:, 0]
+  # time for the ball to reach the keeper plane (x_rel = 0); 0 if already past.
+  t = torch.clamp(-ball_x_rel / (vx - 1e-3), min=0.0, max=2.0)
+  g = 9.81
+  cross = torch.empty_like(bp)
+  cross[:, 0] = org[:, 0]                              # keeper plane (x_rel = 0)
+  cross[:, 1] = bp[:, 1] + bv[:, 1] * t
+  cross[:, 2] = torch.clamp(bp[:, 2] + bv[:, 2] * t - 0.5 * g * t * t, min=0.0)
+
+  # Whole-body: reward ANY body link being at the interception point (a block is
+  # any body part on the ball, not just a hand). This is the precise, adaptive
+  # target the keeper should reach — independent of which fixed dive it uses.
+  body = robot.data.body_link_pos_w                   # (B,L,3)
+  d2 = (body - cross.unsqueeze(1)).pow(2).sum(dim=-1)  # (B,L)
+  return torch.exp(-d2.min(dim=1).values / (std * std))
 
 
 def goalkeeper_stop_ball(
   env: ManagerBasedRlEnv,
   velocity_drop_threshold: float = 2.0,
   behind_robot_x_threshold: float = 0.0,
+  goal_x: float = -0.5,
   ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
   robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-  """One-shot block reward when ball velocity drops significantly.
+  """One-shot block reward when the ball is deflected before entering the goal.
 
-  Paper's combined 'stopball' + 'success' — tracks per-environment max ball
-  speed and awards 1.0 when:
+  Coordinate system (see goalkeeper_ball_reset.py): robot faces +x; ball comes
+  from +x (front) toward -x; the goal plane is at x = goal_x (-0.5). A successful
+  save = the ball is decelerated significantly while it is still in front of the
+  goal plane (i.e. the keeper has deflected/stopped it before it scores).
+
+  Tracks per-environment max ball speed and awards 1.0 when:
     1. max_speed - current_speed > velocity_drop_threshold (2.0 m/s), AND
-    2. ball has passed behind the robot (ball_x > robot_x + threshold).
+    2. the ball has NOT yet crossed the goal plane (ball_x > goal_x).
 
   The reward is awarded at most once per episode per environment.
+  (Was previously gated on ``ball_x > robot_x`` — an inverted condition copied
+  from a stale "ball comes from -x" coordinate convention.)
 
   Weight: 100.0 (matches paper's stopball=100).
   """
@@ -128,9 +224,12 @@ def goalkeeper_stop_ball(
   max_speed = torch.maximum(max_speed, current_speed)
   setattr(env, "_gk_max_ball_speed", max_speed)
 
+  # Ball origin is in env-local x; env_origins offset is added in world frame, so
+  # compare against the goal plane in the robot/world-relative x of the ball.
+  ball_x_rel = ball_pos[:, 0] - env.scene.env_origins[:, 0]
   speed_drop = (max_speed - current_speed) > velocity_drop_threshold
-  ball_behind = ball_pos[:, 0] > (robot_pos[:, 0] + behind_robot_x_threshold)
-  block_detected = speed_drop & ball_behind & (block_awarded < 0.5)
+  ball_in_play = ball_x_rel > goal_x  # not yet scored
+  block_detected = speed_drop & ball_in_play & (block_awarded < 0.5)
 
   reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
 
@@ -140,6 +239,42 @@ def goalkeeper_stop_ball(
     block_awarded[ids] = 1.0
     setattr(env, "_gk_block_awarded", block_awarded)
 
+  return reward
+
+
+def goalkeeper_goal_conceded(
+  env: ManagerBasedRlEnv,
+  goal_x: float = -0.5,
+  goal_half_width: float = 1.5,
+  goal_height: float = 1.8,
+  ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+) -> torch.Tensor:
+  """One-shot penalty (returns 1.0 once) when the ball enters the goal.
+
+  Mirrors the eval block criterion exactly (ball crosses x ≤ goal_x inside the
+  |y| ≤ goal_half_width, z ≤ goal_height frame), so optimizing -weight·this term
+  directly optimizes the evaluated block rate. Awarded at most once per episode.
+  Intended for PPO fine-tuning of an already-competent (distilled) policy, where
+  it provides a precisely-aligned learning signal that dense shaping rewards lack.
+  """
+  ball: Entity = env.scene[ball_cfg.name]
+  ball_pos = ball.data.root_link_pos_w
+  ball_x_rel = ball_pos[:, 0] - env.scene.env_origins[:, 0]
+  ball_y_rel = ball_pos[:, 1] - env.scene.env_origins[:, 1]
+  in_goal = (
+    (ball_x_rel <= goal_x)
+    & (ball_y_rel.abs() <= goal_half_width)
+    & (ball_pos[:, 2] <= goal_height)
+  )
+
+  conceded = _gk_get_or_init_state(env, "_gk_conceded", 0.0)
+  fire = in_goal & (conceded < 0.5)
+  reward = torch.zeros(env.num_envs, device=env.device, dtype=torch.float32)
+  if torch.any(fire):
+    ids = torch.nonzero(fire, as_tuple=False).squeeze(-1)
+    reward[ids] = 1.0
+    conceded[ids] = 1.0
+    setattr(env, "_gk_conceded", conceded)
   return reward
 
 
@@ -166,15 +301,18 @@ def goalkeeper_no_retreat(
 ) -> torch.Tensor:
   """Penalize retreating behind the goal line.
 
-  Paper's 'noretreat' — discourages the robot from moving backward
-  (increasing x) past the goal line. In our coordinate system, the
-  robot faces -y with yaw=π; the ball comes from -x toward +x.
+  Paper's 'noretreat' — discourages the robot from backing into its own goal.
+  Coordinate system (see goalkeeper_ball_reset.py): robot faces +x at x≈0, the
+  ball comes from +x, and the goal is behind at -x. "Retreating" therefore means
+  moving toward -x. We penalize robot_x dropping below goal_line_x.
+  (Was previously ``clamp(robot_x - goal_line_x)`` — penalizing forward motion
+  toward the ball, the opposite of the intent, from a stale coordinate frame.)
 
   Weight: -2.0 (matches paper).
   """
   robot: Entity = env.scene[robot_cfg.name]
-  robot_x = robot.data.root_link_pos_w[:, 0]
-  retreat = torch.clamp(robot_x - goal_line_x, min=0.0)
+  robot_x = robot.data.root_link_pos_w[:, 0] - env.scene.env_origins[:, 0]
+  retreat = torch.clamp(goal_line_x - robot_x, min=0.0)
   return retreat * retreat
 
 
@@ -219,16 +357,18 @@ def goalkeeper_posture_orientation(
 ) -> torch.Tensor:
   """Reward upright posture via projected gravity.
 
-  Paper's 'postorientation' — returns projected_gravity[:, 2] clamped
-  to [0, 1]. When the robot is perfectly upright (gravity points along
-  -z in local frame), projected_gravity_z ≈ 1.0. As the robot tilts,
-  this value decreases.
+  Paper's 'postorientation'. ``projected_gravity_b`` is the (normalized) gravity
+  direction expressed in the robot base frame, so its z-component is ≈ -1.0 when
+  the robot is perfectly upright and rises toward 0 as it tilts to horizontal.
+  We therefore reward ``clamp(-grav_z, 0, 1)`` → 1.0 upright, 0.0 on its side.
+  (Was ``clamp(grav_z, 0, 1)``, which is ≈0 for an upright robot and never fired
+  — a sign error that removed the dense "stay upright" signal.)
 
   Weight: 3.0 (matches paper).
   """
   robot: Entity = env.scene[robot_cfg.name]
   grav_z = robot.data.projected_gravity_b[:, 2]
-  return torch.clamp(grav_z, 0.0, 1.0)
+  return torch.clamp(-grav_z, 0.0, 1.0)
 
 
 def goalkeeper_ang_vel_xy(

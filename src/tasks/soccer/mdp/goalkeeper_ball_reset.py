@@ -121,6 +121,22 @@ class RegionBallVelCfg:
   ball_start_y_range: tuple[float, float] = (-1.5, 1.5)
   ball_start_z_range: tuple[float, float] = (0.1, 1.8)
 
+  # -- Difficulty curriculum (training only; 0 disables → always full range) --
+  # The lateral spread (y) and vertical offset (z) of the ball's landing target
+  # are scaled by a difficulty d in [difficulty_min, 1]. Early in training d is
+  # small, so balls land near the keeper (y≈0, z≈block_center_z) and are easy to
+  # block; d ramps to 1 over `curriculum_warmup_calls` reset calls, expanding to
+  # the full 6-region range. Eval leaves curriculum_warmup_calls=0 ⇒ d=1 always.
+  curriculum_warmup_calls: int = 0
+  difficulty_min: float = 0.25
+  # Flight-time (speed) curriculum: early training multiplies t_flight by
+  # t_flight_slow_factor (slower balls → more time for the keeper to reach even
+  # far crossing points → it learns the full reaching/diving skill), annealed to
+  # ×1 (eval speed) over speed_warmup_calls steps. 0 disables (eval speed always).
+  speed_warmup_calls: int = 0
+  t_flight_slow_factor: float = 2.0
+  block_center_z: float = 0.9  # comfortable hand height the keeper starts from
+
   def __post_init__(self):
     if self.regions is None:
       self.regions = []
@@ -152,11 +168,48 @@ def reset_ball_with_parabolic_trajectory(
   n = len(env_ids)
   device = env.device
 
+  # -- Forced-scenario path (repair oracle) -----------------------------------
+  # If env._gk_forced = {"start":(B,3) world, "vel":(B,3), "region":(B,)} is set,
+  # write those balls directly THROUGH the normal reset so the observation
+  # history is filled correctly (no stale-frame transient). Used to replay exact
+  # scenarios for CEM search and eval-matched demonstration collection.
+  forced = getattr(env, "_gk_forced", None)
+  if forced is not None:
+    asset: Entity = env.scene[ball_cfg.name]
+    drs = asset.data.default_root_state
+    quat = drs[env_ids, 3:7].clone()
+    pos = forced["start"][env_ids]
+    vel = torch.cat([forced["vel"][env_ids], torch.zeros(n, 3, device=device)], dim=-1)
+    asset.write_root_link_pose_to_sim(torch.cat([pos, quat], dim=-1), env_ids=env_ids)
+    asset.write_root_link_velocity_to_sim(vel, env_ids=env_ids)
+    for key, val in (("_gk_region", forced["region"]),
+                     ("_gk_ball_start_x", forced["start"][:, 0] - env.scene.env_origins[:, 0])):
+      t = getattr(env, key, None)
+      if t is None or t.shape[0] != env.num_envs:
+        t = torch.zeros(env.num_envs, dtype=torch.float32, device=device)
+      t[env_ids] = val[env_ids].float(); setattr(env, key, t)
+    return
+
   num_regions = vel_cfg.num_regions
   assert num_regions > 0, "RegionBallVelCfg must have at least one region."
 
   # Pick a random region for each env.
   region_idx = torch.randint(0, num_regions, (n,), device=device)
+
+  # -- Curriculum difficulty (training only) ----------------------------------
+  warmup = getattr(vel_cfg, "curriculum_warmup_calls", 0)
+  if warmup and warmup > 0:
+    # Prefer the env-step counter (one tick per control step) for a schedule that
+    # is independent of how often resets fire; fall back to a reset-call counter.
+    step = getattr(env, "common_step_counter", None)
+    if step is None:
+      step = int(getattr(env, "_gk_curr_calls", 0)) + 1
+      setattr(env, "_gk_curr_calls", step)
+    progress = min(1.0, float(step) / float(warmup))
+    difficulty = vel_cfg.difficulty_min + (1.0 - vel_cfg.difficulty_min) * progress
+  else:
+    difficulty = 1.0
+  z_center = vel_cfg.block_center_z
 
   # Sample ball start position in local frame.
   # G1 faces +x (yaw=0). Ball comes from +x (front), lateral variation in y.
@@ -175,6 +228,10 @@ def reset_ball_with_parabolic_trajectory(
     + torch.rand(n, device=device)
     * (vel_cfg.ball_start_z_range[1] - vel_cfg.ball_start_z_range[0])
   )
+  # Curriculum: pull the lateral spread toward center and the height toward the
+  # keeper's comfortable block height when difficulty < 1 (easy early balls).
+  start_y = start_y * difficulty
+  start_z = z_center + (start_z - z_center) * difficulty
   ball_start_local = torch.stack([start_x, start_y, start_z], dim=-1)
 
   # Sample ball end within chosen region (behind robot, -y).
@@ -207,6 +264,9 @@ def reset_ball_with_parabolic_trajectory(
   end_z = region_height_low + torch.rand(n, device=device) * (
     region_height_high - region_height_low
   )
+  # Curriculum scaling (see start position above).
+  end_y = end_y * difficulty
+  end_z = z_center + (end_z - z_center) * difficulty
   ball_end_local = torch.stack([end_x, end_y, end_z], dim=-1)
 
   # Convert to world frame (env_origins at robot base x=0).
@@ -219,6 +279,17 @@ def reset_ball_with_parabolic_trajectory(
     + torch.rand(n, device=device)
     * (vel_cfg.t_flight_range[1] - vel_cfg.t_flight_range[0])
   )
+
+  # Flight-time (speed) curriculum: slower balls early, eval-speed later.
+  speed_warmup = getattr(vel_cfg, "speed_warmup_calls", 0)
+  if speed_warmup and speed_warmup > 0:
+    step = getattr(env, "common_step_counter", None)
+    if step is None:
+      step = int(getattr(env, "_gk_speed_calls", 0)) + 1
+      setattr(env, "_gk_speed_calls", step)
+    sp = min(1.0, float(step) / float(speed_warmup))
+    slow = vel_cfg.t_flight_slow_factor * (1.0 - sp) + 1.0 * sp
+    t_flight = t_flight * slow
 
   # Parabolic trajectory velocity computation.
   delta_pos = ball_end_w - ball_start_w
@@ -236,6 +307,14 @@ def reset_ball_with_parabolic_trajectory(
     setattr(env, "_gk_region", t)
   t[env_ids] = region_idx.float()
   setattr(env, "_gk_region", t)
+
+  # Store the ball's start x (env-local) per env, for ball-synchronized motion phase.
+  sx = getattr(env, "_gk_ball_start_x", None)
+  if sx is None or sx.shape[0] != env.num_envs:
+    sx = torch.full((env.num_envs,), 4.0, dtype=torch.float32, device=device)
+    setattr(env, "_gk_ball_start_x", sx)
+  sx[env_ids] = start_x
+  setattr(env, "_gk_ball_start_x", sx)
 
   # Ball orientation unchanged from default.
   asset: Entity = env.scene[ball_cfg.name]
