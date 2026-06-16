@@ -11,6 +11,8 @@ from __future__ import annotations
 import torch
 from rsl_rl.algorithms.ppo import PPO
 
+from src.tasks.soccer.modules.symmetry import mirror_obs, mirror_action
+
 
 class BCAnchorPPO(PPO):
   std_clamp: float = 0.06
@@ -19,6 +21,9 @@ class BCAnchorPPO(PPO):
   bc_coef: float = 0.5
   bc_steps: int = 1
   bc_batch: int = 8192
+  # Left/right symmetry: enforce equivariance pi(o)==mirror_action(pi(mirror_obs(o)))
+  # to remove the ~7% left<right asymmetry. 0 disables.
+  sym_coef: float = 0.0
 
   def update(self):
     out = super().update()
@@ -31,9 +36,21 @@ class BCAnchorPPO(PPO):
       n = self.bc_obs.shape[0]
       for _ in range(self.bc_steps):
         idx = torch.randint(0, n, (self.bc_batch,), device=self.bc_obs.device)
-        pred = self.actor({"actor": self.bc_obs[idx]}, stochastic_output=False)
+        o = self.bc_obs[idx]
+        pred = self.actor({"actor": o}, stochastic_output=False)
         loss = self.bc_coef * torch.nn.functional.smooth_l1_loss(pred, self.bc_act[idx])
+        if self.sym_coef > 0:
+          # symmetric BC: mirrored obs -> mirrored target action
+          loss = loss + self.bc_coef * torch.nn.functional.smooth_l1_loss(
+            self.actor({"actor": mirror_obs(o)}, stochastic_output=False),
+            mirror_action(self.bc_act[idx]))
+          # equivariance consistency pi(o) == mirror(pi(mirror(o)))
+          a = self.actor({"actor": o}, stochastic_output=False)
+          am = self.actor({"actor": mirror_obs(o)}, stochastic_output=False)
+          loss = loss + self.sym_coef * torch.nn.functional.smooth_l1_loss(
+            a, mirror_action(am))
         self.optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), 1.0)  # prevent blow-up
         self.optimizer.step()
     return out

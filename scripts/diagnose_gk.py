@@ -43,14 +43,24 @@ class Cfg:
   residual_base: str = ""        # eval a GoalkeeperResidual checkpoint on this frozen base
   residual_scale: float = 1.5
   residual_head: tuple[int, ...] = (512, 256, 128)
+  seed: int | None = None        # fix env seed for cross-GPU diff-test (same balls)
+  regions: tuple[int, ...] = ()  # restrict ball reset to these regions
 
 
 def main(cfg: Cfg):
   configure_torch_backends()
+  if cfg.seed is not None:
+    import torch as _t; _t.manual_seed(cfg.seed)
   env_cfg = load_env_cfg("Eval-Goalkeeper", play=False)
   env_cfg.scene.num_envs = cfg.num_envs
+  if cfg.seed is not None:
+    env_cfg.seed = cfg.seed
   if "fell_over" in env_cfg.terminations:
     env_cfg.terminations["fell_over"] = None
+  if cfg.regions:
+    import copy as _c
+    rb = env_cfg.events["reset_ball"]; vc = _c.copy(rb.params["vel_cfg"])
+    vc.regions = [vc.regions[i] for i in cfg.regions]; rb.params["vel_cfg"] = vc
   env = RslRlVecEnvWrapper(ManagerBasedRlEnv(cfg=env_cfg, device=cfg.device), clip_actions=100.0)
 
   import os, sys

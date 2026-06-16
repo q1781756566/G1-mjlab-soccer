@@ -54,6 +54,7 @@ class Cfg:
   seed: int = 0
   device: str = "cuda:0"
   out: str = ""              # collect: path to save dataset
+  residlib: str = ""         # path to save residual library {feat:(M,3), mu:(M,K,J), blocked}
   w_dist: float = 60.0       # cost weight on min blocking-link distance
   w_goal: float = 1000.0     # cost weight on conceding
   w_res: float = 0.2         # cost weight on residual L2
@@ -169,6 +170,7 @@ def main(cfg: Cfg):
     return cost, ~entered, min_d
 
   all_data_obs, all_data_act, all_data_blk = [], [], []
+  lib_feat, lib_mu, lib_blk, lib_scross = [], [], [], []   # residual library: (crossing_y,z,t_flight) -> dive spline
   agg_base, agg_rep, agg_n = 0, 0, 0
   for b in range(cfg.batches):
     reg, start, end, tf = _gen_scenarios(env, cfg.regions, cfg.G, gen, dev)
@@ -219,6 +221,14 @@ def main(cfg: Cfg):
     else:
       _, rep_blk, _ = rollout(mu_e, start, vel, reg)
     rep_rate = rep_blk.view(cfg.G, cfg.P).float().mean(1)
+    if cfg.residlib:   # save per-scenario (crossing_y, crossing_z, t_flight) -> mu spline
+      vx = vel[:, 0]; tc = torch.clamp(-start[:, 0] / (vx - 1e-3), 0.0, 2.0)
+      cy = start[:, 1] + vel[:, 1] * tc
+      cz = start[:, 2] + vel[:, 2] * tc - 0.5 * 9.81 * tc * tc
+      feat = torch.stack([cy, cz, tf], -1)                  # (G,3)
+      lib_feat.append(feat.cpu()); lib_mu.append(mu.cpu())  # mu:(G,K,J)
+      lib_blk.append(rep_blk[keep].cpu())
+      lib_scross.append((tc / 0.02).cpu())                  # ball crossing step (for phase-sync)
     nb = int(base_rate.sum() * 1);
     agg_base += float(base_rate.mean()) * cfg.G
     agg_rep += float(rep_rate.mean()) * cfg.G
@@ -228,6 +238,13 @@ def main(cfg: Cfg):
   print(f"\n{'='*60}\n  REGIONS {[_REGION[r] for r in cfg.regions]}\n"
         f"  base {100*agg_base/agg_n:.1f}%  ->  repaired {100*agg_rep/agg_n:.1f}%   "
         f"(over {agg_n} scenarios)\n{'='*60}")
+  if cfg.residlib and lib_feat:
+    Path(cfg.residlib).parent.mkdir(parents=True, exist_ok=True)
+    torch.save({"feat": torch.cat(lib_feat), "mu": torch.cat(lib_mu), "scross": torch.cat(lib_scross),
+                "blocked": torch.cat(lib_blk), "knot_span": cfg.knot_span,
+                "knots": cfg.knots, "clip": cfg.clip}, cfg.residlib)
+    n = torch.cat(lib_blk); print(f"  saved residlib {n.shape[0]} entries "
+          f"({float(n.float().mean()):.2f} blocked) to {cfg.residlib}", flush=True)
   if cfg.mode == "collect" and cfg.out:
     obs = torch.cat(all_data_obs); act = torch.cat(all_data_act); bk = torch.cat(all_data_blk)
     Path(cfg.out).parent.mkdir(parents=True, exist_ok=True)

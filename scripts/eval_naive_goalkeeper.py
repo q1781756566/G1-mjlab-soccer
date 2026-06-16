@@ -60,6 +60,64 @@ class EvalConfig:
   task_id: str = "Eval-Goalkeeper"
 
 
+class MoE6Policy:
+  """Region mixture-of-experts goalkeeper (our best policy).
+
+  A self-contained `goalkeeper_moe6.pt` bundle holds 6 region specialists
+  (`sr[0..5]`, region order R/L x Mid/Up/Low) plus the gate config. At inference
+  a ballistic-crossing gate routes each ball — once it is clearly approaching
+  (`bx < latch_hi`) — to its region specialist, latched for the episode. Right-Up
+  reuses the stronger Left-Up specialist via the validated L/R mirror
+  (`mirror_map`). This is the policy; `reset()` clears the per-episode latch.
+  """
+
+  def __init__(self, bundle, env, device):
+    from mjlab.rl import MjlabOnPolicyRunner
+    from src.tasks.soccer.config.g1.gk_train_cfg import goalkeeper_train_runner_cfg
+    import tempfile
+    self.z_low = bundle.get("z_low", 0.85); self.z_up = bundle.get("z_up", 1.35)
+    self.vz_low = bundle.get("vz_low", -5.0); self.latch_hi = bundle.get("latch_hi", 5.0)
+    td = tempfile.mkdtemp(prefix="moe6_")
+
+    def _load(sd):
+      f = f"{td}/e.pt"; torch.save(sd, f)
+      r = MjlabOnPolicyRunner(env, asdict(goalkeeper_train_runner_cfg()), device=device)
+      r.load(f, load_cfg={"actor": True}); return r.get_inference_policy(device=device)
+
+    self.experts = [_load(bundle["sr"][i]) for i in range(6)]
+    mm = bundle.get("mirror_map", "")
+    if mm:
+      from src.tasks.soccer.modules.symmetry import mirror_obs, mirror_action
+      base = list(self.experts)
+      def _mir(p):
+        return lambda obs: mirror_action(p({"actor": mirror_obs(obs["actor"])}))
+      for pair in mm.split(","):
+        dst, src = (int(x) for x in pair.split(":")); self.experts[dst] = _mir(base[src])
+    self.ball = env.unwrapped.scene["ball"]; self.org = env.unwrapped.scene.env_origins
+    self.N = env.unwrapped.num_envs; self.dev = device; self.g = 9.81
+    self.reset()
+
+  def reset(self):
+    self.latched = torch.full((self.N,), -1, dtype=torch.long, device=self.dev)
+
+  def __call__(self, obs):
+    bp = self.ball.data.root_link_pos_w; bv = self.ball.data.root_link_lin_vel_w
+    bx = bp[:, 0] - self.org[:, 0]; vx = bv[:, 0]
+    valid = (vx < -1.0) & (bx > 0.2) & (bx < self.latch_hi)
+    t = torch.clamp(-bx / (vx - 1e-3), 0.0, 2.0)
+    cy = (bp[:, 1] - self.org[:, 1]) + bv[:, 1] * t
+    cz = bp[:, 2] + bv[:, 2] * t - 0.5 * self.g * t * t
+    base = torch.zeros(self.N, dtype=torch.long, device=self.dev)
+    base = torch.where(cz < self.z_low, torch.full_like(base, 4), base)
+    base = torch.where(cz > self.z_up, torch.full_like(base, 2), base)
+    base = torch.where(bv[:, 2] - self.g * t < self.vz_low, torch.full_like(base, 4), base)
+    reg = base + (cy < 0).long()
+    newl = valid & (self.latched < 0); self.latched = torch.where(newl, reg, self.latched)
+    use = torch.where(self.latched < 0, torch.zeros_like(self.latched), self.latched)
+    acts = torch.stack([e(obs) for e in self.experts], 0)   # (6, N, 29)
+    return acts[use, torch.arange(self.N, device=self.dev)]
+
+
 def _load_policy(checkpoint_path: str, env, device: str):
   """Load a Goalkeeper checkpoint using GoalkeeperRunner directly.
 
@@ -71,6 +129,12 @@ def _load_policy(checkpoint_path: str, env, device: str):
   """
   print(f"[INFO] Loading policy from: {checkpoint_path}")
   loaded = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+  if isinstance(loaded, dict) and "sr" in loaded:
+    print("[INFO] Detected MoE6 region-specialist bundle — loading mixture-of-experts.")
+    policy = MoE6Policy(loaded, env, device)
+    print("[INFO] Policy loaded successfully.")
+    return policy
 
   if "model_state_dict" in loaded:
     # Reference Humanoid-Goalkeeper checkpoint: a single unified HIMPPO
@@ -125,6 +189,8 @@ def run_trial(env, policy, max_steps: int = 150) -> dict:
   obs = env.reset()
   if isinstance(obs, tuple):
     obs = obs[0]
+  if hasattr(policy, "reset"):
+    policy.reset()   # clear per-episode latch (MoE6 gate) at each new ball
 
   ball = env.unwrapped.scene["ball"]
   ball_entered = False
