@@ -22,8 +22,8 @@ def _load(env, ckpt, dev):
 
 @dataclass
 class Cfg:
-  moe6: str = ""                 # single bundled checkpoint {sr:[6], z_low, z_up}
-  dir: str = "logs/repairs"      # loads {dir}/sr0..sr5.pt
+  moe6: str = "src/assets/soccer/weight/goalkeeper_moe6.pt"  # the committed 91% deliverable bundle
+  dir: str = "logs/repairs"      # (training-box only) loads {dir}/sr0..sr5.pt when --moe6 is cleared
   prefix: str = "sr"
   num_envs: int = 256
   batches: int = 16

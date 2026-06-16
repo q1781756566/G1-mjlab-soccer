@@ -29,6 +29,13 @@ has ±6% binomial noise — never compare on 50 trials.
 Eval the best: `python scripts/eval_moe6.py --moe6 src/assets/soccer/weight/goalkeeper_moe6.pt --seed 2810 --num-envs 256 --batches 16` (the bundle now carries `latch_hi`, `mirror_map`, and the z/vz gate config, so no flags are needed). Generalises off-benchmark: seeds 4567/99 → 90.5% / 89.7% (mean ≈ 90.5%).
 **6-way MoE** = one specialist per region (`train_polish.py --train-regions <r>`; Up specialists use the crossing-instant reward `--w-cross`), routed by a ballistic gate on crossing height + side + descent rate (low-landing balls descend steeply → routed Low even when they cross higher).
 
+> **Where the weights live.** The deployable policies are committed under
+> `src/assets/soccer/weight/` (`goalkeeper_moe6.pt` = this 91% deliverable;
+> `goalkeeper_polished_v2.pt`, `goalkeeper_distilled_v3.pt`, reference `goalkeeper.pt`).
+> Any `logs/…pt` paths in script *defaults* (`train_polish.py --init`, `eval_moe.py`, …)
+> are training-box scratch — `logs/` is git-ignored and is **not** needed to evaluate
+> or deploy. To run anything, point at the `src/assets/soccer/weight/` paths above.
+
 **The 86 → 91 jump came from two eval-time fixes, no retraining.** A per-region diagnostic (gate accuracy vs true region; block rate of correctly-routed vs misrouted balls) showed the 86→89.8 gap was *not* routing accuracy (a flat 77.7% — most misroutes are same-side-adjacent and still saved) but two other things:
 
 1. **Routing *timing*, not accuracy (+4%).** The gate only latched once the ball was close (`bx < 3.5`); the first frames of *every* ball were handled by the default expert 0 (Right-Mid, a *right*-diver), which commits left balls the wrong way before the left expert ever engages — fatal for the left side (Left-Low: 97.4% with the right expert from frame 0 vs 86.4% when the right expert handled the first frames). Latching as soon as the ball is clearly approaching (`bx < latch_hi = 5.0`, a broad plateau 5.0–7.0) lets the correct specialist drive the whole dive. This *recovers and slightly exceeds* the perfect-gate ceiling (the crossing-height heuristic even routes some hard balls to better-suited experts than their launch region would): **86.0% → 90.0%**, and it generalises across seeds (+3.3 to +4.1%).

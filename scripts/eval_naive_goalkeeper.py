@@ -12,11 +12,14 @@ Usage:
   python scripts/eval_naive_goalkeeper.py
 
   # Interactive viewer (trained policy)
-  python scripts/eval_naive_goalkeeper.py --checkpoint logs/rsl_rl/g1_soccer/model_5000.pt
+  python scripts/eval_naive_goalkeeper.py --checkpoint src/assets/soccer/weight/goalkeeper_moe6.pt
 
-  # Headless multi-trial eval with stats
+  # Headless multi-trial eval with stats (our best = goalkeeper_moe6.pt, the 91% MoE bundle)
   python scripts/eval_naive_goalkeeper.py --headless --num-trials=50
-  python scripts/eval_naive_goalkeeper.py --headless --num-trials=500 --checkpoint <path>
+  python scripts/eval_naive_goalkeeper.py --headless --num-trials=500 \
+      --checkpoint src/assets/soccer/weight/goalkeeper_moe6.pt
+  # NOTE: deployable weights live in src/assets/soccer/weight/. Any logs/ paths in
+  # other scripts' defaults are training-box scratch (gitignored) — not needed to eval.
 
   # With video
   python scripts/eval_naive_goalkeeper.py --video --video-length=300
